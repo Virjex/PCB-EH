@@ -22,9 +22,9 @@ void Renderer::check_vk_result(VkResult err) {
     if (err < 0) abort();
 }
 
-void Renderer::Init(GLFWwindow* window) {
+void Renderer::Init(GLFWwindow* w) {
+    window = w;
     createInstance();
-
     check_vk_result(glfwCreateWindowSurface(instance, window, nullptr, &surface));
 
     pickPhysicalDevice();
@@ -37,6 +37,32 @@ void Renderer::Init(GLFWwindow* window) {
     createCommandBuffers();
     createSyncObjects();
 }
+
+void Renderer::RecreateSwapchain() {
+    int width = 0, height = 0;
+    while (width == 0 || height == 0) {
+        glfwGetFramebufferSize(window, &width, &height);
+        glfwWaitEvents();
+    }
+
+    vkDeviceWaitIdle(device);
+
+    for (auto framebuffer : framebuffers)
+        vkDestroyFramebuffer(device, framebuffer, nullptr);
+    for (auto view : swapchain_image_views)
+        vkDestroyImageView(device, view, nullptr);
+    vkDestroyPipeline(device, pipeline, nullptr);
+    vkDestroyPipelineLayout(device, pipeline_layout, nullptr);
+    vkDestroyRenderPass(device, render_pass, nullptr);
+    vkDestroySwapchainKHR(device, swapchain, nullptr);
+
+    createSwapchain(window);
+    createRenderPass();
+    createPipeline();
+    createFramebuffers();
+    markAllDirty();
+}
+
 
 void Renderer::createPipeline() {
     // Load shaders
@@ -178,7 +204,13 @@ void Renderer::RenderFrame(const CADDocument& doc) {
     vkResetFences(device, 1, &frame_fences[frame_index]);
 
     uint32_t image_index;
-    vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, image_acquired_semaphores[frame_index], VK_NULL_HANDLE, &image_index);
+    VkResult acquire_result = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX,
+        image_acquired_semaphores[frame_index], VK_NULL_HANDLE, &image_index);
+
+    if (acquire_result == VK_ERROR_OUT_OF_DATE_KHR) {
+        RecreateSwapchain();
+        return;
+    }
 
     VkCommandBuffer cmd = command_buffers[frame_index];
 
@@ -197,7 +229,6 @@ void Renderer::RenderFrame(const CADDocument& doc) {
     render_pass_info.clearValueCount = 1;
     render_pass_info.pClearValues = &clear_value;
 
-    // Only regenerate geometry if dirty
     if (sceneDirty) {
         vertices.clear();
         for (const auto& layer : doc.GetLayers()) {
@@ -207,8 +238,6 @@ void Renderer::RenderFrame(const CADDocument& doc) {
                 if (type == "Line") {
                     const LineEntity* line = dynamic_cast<const LineEntity*>(entity.get());
                     if (line) {
-                        std::cout << "DRAW Line: (" << line->x1 << "," << line->y1 << ") -> ("
-                                << line->x2 << "," << line->y2 << ")\n";
                         vertices.push_back({ { line->x1, line->y1 }, { 1.0f, 0.0f, 0.0f } });
                         vertices.push_back({ { line->x2, line->y2 }, { 1.0f, 0.0f, 0.0f } });
                     }
@@ -216,8 +245,6 @@ void Renderer::RenderFrame(const CADDocument& doc) {
                     const CircleEntity* circle = dynamic_cast<const CircleEntity*>(entity.get());
                     if (circle) {
                         constexpr int SEGMENTS = 64;
-                        std::cout << "DRAW Circle: center=(" << circle->cx << "," << circle->cy
-                                    << "), radius=" << circle->radius << "\n";
                         for (int i = 0; i < SEGMENTS; ++i) {
                             float angle1 = (float)i / SEGMENTS * 2.0f * 3.1415926f;
                             float angle2 = (float)(i + 1) / SEGMENTS * 2.0f * 3.1415926f;
@@ -249,7 +276,7 @@ void Renderer::RenderFrame(const CADDocument& doc) {
 
     VkDeviceSize offsets[] = { 0 };
     vkCmdBindVertexBuffers(cmd, 0, 1, &vertexBufferLayers, offsets);
-    vkCmdPushConstants(cmd,pipeline_layout,VK_SHADER_STAGE_VERTEX_BIT,0,sizeof(glm::mat4),&viewProjMatrix);
+    vkCmdPushConstants(cmd, pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(glm::mat4), &viewProjMatrix);
     vkCmdDraw(cmd, static_cast<uint32_t>(vertices.size()), 1, 0, 0);
 
     ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
@@ -275,7 +302,13 @@ void Renderer::RenderFrame(const CADDocument& doc) {
     present_info.swapchainCount = 1;
     present_info.pSwapchains = &swapchain;
     present_info.pImageIndices = &image_index;
-    check_vk_result(vkQueuePresentKHR(queue, &present_info));
+
+    VkResult present_result = vkQueuePresentKHR(queue, &present_info);
+    if (present_result == VK_ERROR_OUT_OF_DATE_KHR || present_result == VK_SUBOPTIMAL_KHR) {
+        RecreateSwapchain();
+    } else {
+        check_vk_result(present_result);
+    }
 
     frame_index = (frame_index + 1) % FRAME_COUNT;
 }
@@ -406,6 +439,13 @@ void Renderer::createInstance() {
 }
 
 void Renderer::createSwapchain(GLFWwindow* window) {
+    int width = 0, height = 0;
+    glfwGetFramebufferSize(window, &width, &height);
+    while (width == 0 || height == 0) {
+        glfwGetFramebufferSize(window, &width, &height);
+        glfwWaitEvents();
+    }
+
     VkSurfaceCapabilitiesKHR capabilities;
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device, surface, &capabilities);
 

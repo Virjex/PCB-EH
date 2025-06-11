@@ -29,7 +29,7 @@ public:
     void RenderFrame(const CADDocument& doc);
     void Cleanup();
     void createPipeline();
-
+    void RecreateSwapchain();
     VkInstance GetInstance() const { return instance; }
     VkDevice GetDevice() const { return device; }
     VkPhysicalDevice GetPhysicalDevice() const { return physical_device; }
@@ -54,6 +54,7 @@ private:
     bool sceneDirty = true;      // Set true if geometry changes
     bool selectionDirty = true;  // Set true if selection changes
     bool cameraDirty = true;     // Set true if zoom/pan changes
+    GLFWwindow* window = nullptr;
 
     void createInstance();
     void pickPhysicalDevice();
