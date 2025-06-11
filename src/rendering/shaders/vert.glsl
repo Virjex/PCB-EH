@@ -3,14 +3,14 @@
 layout(location = 0) in vec2 inPos;
 layout(location = 1) in vec3 inColor;
 
-layout(location = 0) out vec3 outColor;
+layout(push_constant) uniform PushConstants {
+    mat4 viewProj;
+} pc;
+
+layout(location = 0) out vec3 fragColor;
 
 void main() {
-    outColor = inColor;
-
-    // Map coordinates to NDC (-1 .. +1) → you can change this later to camera transform!
-    // For now: just simple scale to [-1, 1] space:
-    float scale = 1.0 / 500.0; // Example scale — adjust for your coordinate system
-
-    gl_Position = vec4(inPos.x * scale, inPos.y * scale, 0.0, 1.0);
+    vec4 worldPos = vec4(inPos.x, inPos.y, 0.0, 1.0); // z=0, 2D locked
+    gl_Position = pc.viewProj * worldPos;
+    fragColor = inColor;
 }
