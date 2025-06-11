@@ -11,6 +11,10 @@
 #include <iostream>
 #include <algorithm>
 #include <fstream>
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+
+glm::mat4 viewProjMatrix = glm::mat4(1.0f);
 
 void Renderer::check_vk_result(VkResult err) {
     if (err == 0) return;
@@ -40,6 +44,11 @@ void Renderer::createPipeline() {
     VkShaderModule frag_shader_module = loadShaderModule("src/rendering/shaders/frag.spv");
 
     // Shader stages
+    VkPushConstantRange push_constant_range = {};
+    push_constant_range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    push_constant_range.offset = 0;
+    push_constant_range.size = sizeof(glm::mat4);
+
     VkPipelineShaderStageCreateInfo vert_stage_info = {};
     vert_stage_info.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     vert_stage_info.stage = VK_SHADER_STAGE_VERTEX_BIT;
@@ -136,10 +145,14 @@ void Renderer::createPipeline() {
     // Pipeline layout
     VkPipelineLayoutCreateInfo pipeline_layout_info = {};
     pipeline_layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipeline_layout_info.pushConstantRangeCount = 1;
+    pipeline_layout_info.pPushConstantRanges = &push_constant_range;
     check_vk_result(vkCreatePipelineLayout(device, &pipeline_layout_info, nullptr, &pipeline_layout));
+
 
     // Final pipeline
     VkGraphicsPipelineCreateInfo pipeline_info = {};
+    pipeline_info.layout = pipeline_layout;
     pipeline_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
     pipeline_info.stageCount = 2;
     pipeline_info.pStages = shader_stages;
@@ -183,102 +196,67 @@ void Renderer::RenderFrame(const CADDocument& doc) {
     render_pass_info.renderArea.extent = swapchain_extent;
     render_pass_info.clearValueCount = 1;
     render_pass_info.pClearValues = &clear_value;
-    vertices.clear();
 
-    for (const auto& layer : doc.GetLayers()) {
-        if (!layer.visible) continue;
-
-        for (const auto& entity : layer.entities) {
-            std::string type = entity->GetType();
-
-            if (type == "Line") {
-                const LineEntity* line = dynamic_cast<const LineEntity*>(entity.get());
-                if (line) {
-                    vertices.push_back({ { line->x1, line->y1 }, { 1.0f, 0.0f, 0.0f } });
-                    vertices.push_back({ { line->x2, line->y2 }, { 1.0f, 0.0f, 0.0f } });
-                }
-            }
-            else if (type == "Circle") {
-                const CircleEntity* circle = dynamic_cast<const CircleEntity*>(entity.get());
-                if (circle) {
-                    constexpr int SEGMENTS = 64;
-                    for (int i = 0; i < SEGMENTS; ++i) {
-                        float angle1 = (float)i / SEGMENTS * 2.0f * 3.1415926f;
-                        float angle2 = (float)(i + 1) / SEGMENTS * 2.0f * 3.1415926f;
-
-                        float x1 = circle->cx + cos(angle1) * circle->radius;
-                        float y1 = circle->cy + sin(angle1) * circle->radius;
-
-                        float x2 = circle->cx + cos(angle2) * circle->radius;
-                        float y2 = circle->cy + sin(angle2) * circle->radius;
-
-                        // Represent circle as LINE LOOP (segments)
-                        vertices.push_back({ { x1, y1 }, { 0.0f, 1.0f, 0.0f } });
-                        vertices.push_back({ { x2, y2 }, { 0.0f, 1.0f, 0.0f } });
+    // Only regenerate geometry if dirty
+    if (sceneDirty) {
+        vertices.clear();
+        for (const auto& layer : doc.GetLayers()) {
+            if (!layer.visible) continue;
+            for (const auto& entity : layer.entities) {
+                std::string type = entity->GetType();
+                if (type == "Line") {
+                    const LineEntity* line = dynamic_cast<const LineEntity*>(entity.get());
+                    if (line) {
+                        std::cout << "DRAW Line: (" << line->x1 << "," << line->y1 << ") -> ("
+                                << line->x2 << "," << line->y2 << ")\n";
+                        vertices.push_back({ { line->x1, line->y1 }, { 1.0f, 0.0f, 0.0f } });
+                        vertices.push_back({ { line->x2, line->y2 }, { 1.0f, 0.0f, 0.0f } });
+                    }
+                } else if (type == "Circle") {
+                    const CircleEntity* circle = dynamic_cast<const CircleEntity*>(entity.get());
+                    if (circle) {
+                        constexpr int SEGMENTS = 64;
+                        std::cout << "DRAW Circle: center=(" << circle->cx << "," << circle->cy
+                                    << "), radius=" << circle->radius << "\n";
+                        for (int i = 0; i < SEGMENTS; ++i) {
+                            float angle1 = (float)i / SEGMENTS * 2.0f * 3.1415926f;
+                            float angle2 = (float)(i + 1) / SEGMENTS * 2.0f * 3.1415926f;
+                            float x1 = circle->cx + cos(angle1) * circle->radius;
+                            float y1 = circle->cy + sin(angle1) * circle->radius;
+                            float x2 = circle->cx + cos(angle2) * circle->radius;
+                            float y2 = circle->cy + sin(angle2) * circle->radius;
+                            vertices.push_back({ { x1, y1 }, { 0.0f, 1.0f, 0.0f } });
+                            vertices.push_back({ { x2, y2 }, { 0.0f, 1.0f, 0.0f } });
+                        }
                     }
                 }
             }
         }
+
+        size_t buffer_size = vertices.size() * sizeof(Vertex);
+        createVertexBuffer(buffer_size);
+
+        void* data;
+        check_vk_result(vkMapMemory(device, vertexMemoryLayers, 0, buffer_size, 0, &data));
+        memcpy(data, vertices.data(), buffer_size);
+        vkUnmapMemory(device, vertexMemoryLayers);
+
+        sceneDirty = false;
     }
-
-    size_t buffer_size = vertices.size() * sizeof(Vertex);
-    createVertexBuffer(buffer_size);
-
-    void* data;
-    check_vk_result(vkMapMemory(device, vertex_buffer_memory, 0, buffer_size, 0, &data));
-    memcpy(data, vertices.data(), buffer_size);
-    vkUnmapMemory(device, vertex_buffer_memory);
-
 
     vkCmdBeginRenderPass(cmd, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
-
-    // Bind pipeline
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 
-    // Bind vertex buffer
     VkDeviceSize offsets[] = { 0 };
-    vkCmdBindVertexBuffers(cmd, 0, 1, &vertex_buffer, offsets);
-
-    // Issue draw call!
+    vkCmdBindVertexBuffers(cmd, 0, 1, &vertexBufferLayers, offsets);
+    vkCmdPushConstants(cmd,pipeline_layout,VK_SHADER_STAGE_VERTEX_BIT,0,sizeof(glm::mat4),&viewProjMatrix);
     vkCmdDraw(cmd, static_cast<uint32_t>(vertices.size()), 1, 0, 0);
 
-
-    // ENTITY DRAW LOOP:
-    for (const auto& layer : doc.GetLayers()) {
-        if (!layer.visible) continue;
-
-        for (const auto& entity : layer.entities) {
-            std::string type = entity->GetType();
-
-            if (type == "Line") {
-                const LineEntity* line = dynamic_cast<const LineEntity*>(entity.get());
-                if (line) {
-                    std::cout << "DRAW Line: (" << line->x1 << "," << line->y1 << ") -> ("
-                              << line->x2 << "," << line->y2 << ")\n";
-
-                    // TODO: Vulkan draw for line
-                }
-            }
-            else if (type == "Circle") {
-                const CircleEntity* circle = dynamic_cast<const CircleEntity*>(entity.get());
-                if (circle) {
-                    std::cout << "DRAW Circle: center=(" << circle->cx << "," << circle->cy
-                              << "), radius=" << circle->radius << "\n";
-
-                    // TODO: Vulkan draw for circle
-                }
-            }
-        }
-    }
-
-    // ImGui draw:
     ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
-
     vkCmdEndRenderPass(cmd);
     check_vk_result(vkEndCommandBuffer(cmd));
 
     VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-
     VkSubmitInfo submit_info = {};
     submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submit_info.waitSemaphoreCount = 1;
@@ -288,7 +266,6 @@ void Renderer::RenderFrame(const CADDocument& doc) {
     submit_info.pCommandBuffers = &cmd;
     submit_info.signalSemaphoreCount = 1;
     submit_info.pSignalSemaphores = &render_complete_semaphores[frame_index];
-
     check_vk_result(vkQueueSubmit(queue, 1, &submit_info, frame_fences[frame_index]));
 
     VkPresentInfoKHR present_info = {};
@@ -298,11 +275,11 @@ void Renderer::RenderFrame(const CADDocument& doc) {
     present_info.swapchainCount = 1;
     present_info.pSwapchains = &swapchain;
     present_info.pImageIndices = &image_index;
-
     check_vk_result(vkQueuePresentKHR(queue, &present_info));
 
     frame_index = (frame_index + 1) % FRAME_COUNT;
 }
+
 
 void Renderer::Cleanup() {
     vkDeviceWaitIdle(device);
@@ -328,50 +305,64 @@ void Renderer::Cleanup() {
 }
 
 void Renderer::createVertexBuffer(size_t size) {
-    if (vertex_buffer != VK_NULL_HANDLE) {
-        vkDestroyBuffer(device, vertex_buffer, nullptr);
-        vkFreeMemory(device, vertex_buffer_memory, nullptr);
+    // Clean up previous buffer if it exists
+    if (vertexBufferLayers != VK_NULL_HANDLE) {
+        vkDestroyBuffer(device, vertexBufferLayers, nullptr);
+        vertexBufferLayers = VK_NULL_HANDLE;
+    }
+    if (vertexMemoryLayers != VK_NULL_HANDLE) {
+        vkFreeMemory(device, vertexMemoryLayers, nullptr);
+        vertexMemoryLayers = VK_NULL_HANDLE;
     }
 
+    // Create the buffer
     VkBufferCreateInfo buffer_info = {};
     buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     buffer_info.size = size;
     buffer_info.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
     buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-    check_vk_result(vkCreateBuffer(device, &buffer_info, nullptr, &vertex_buffer));
+    check_vk_result(vkCreateBuffer(device, &buffer_info, nullptr, &vertexBufferLayers));
 
+    // Get memory requirements
     VkMemoryRequirements mem_requirements;
-    vkGetBufferMemoryRequirements(device, vertex_buffer, &mem_requirements);
+    vkGetBufferMemoryRequirements(device, vertexBufferLayers, &mem_requirements);
 
+    // Allocate memory
     VkMemoryAllocateInfo alloc_info = {};
     alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     alloc_info.allocationSize = mem_requirements.size;
 
-    // Find suitable memory type:
     VkPhysicalDeviceMemoryProperties mem_properties;
     vkGetPhysicalDeviceMemoryProperties(physical_device, &mem_properties);
 
     uint32_t memory_type_index = (uint32_t)-1;
     for (uint32_t i = 0; i < mem_properties.memoryTypeCount; i++) {
         if ((mem_requirements.memoryTypeBits & (1 << i)) &&
-            (mem_properties.memoryTypes[i].propertyFlags & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))) {
+            (mem_properties.memoryTypes[i].propertyFlags &
+             (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))) {
             memory_type_index = i;
             break;
         }
     }
 
-    if (memory_type_index == (uint32_t)-1)
+    if (memory_type_index == (uint32_t)-1) {
         throw std::runtime_error("Failed to find suitable memory type for vertex buffer!");
+    }
 
     alloc_info.memoryTypeIndex = memory_type_index;
 
-    check_vk_result(vkAllocateMemory(device, &alloc_info, nullptr, &vertex_buffer_memory));
-    check_vk_result(vkBindBufferMemory(device, vertex_buffer, vertex_buffer_memory, 0));
+    check_vk_result(vkAllocateMemory(device, &alloc_info, nullptr, &vertexMemoryLayers));
+    check_vk_result(vkBindBufferMemory(device, vertexBufferLayers, vertexMemoryLayers, 0));
 }
 
+void Renderer::UpdateCamera(float zoom, glm::vec2 pan) {
+    glm::mat4 proj = glm::ortho(-zoom, zoom, -zoom, zoom, -1.0f, 1.0f);
+    glm::mat4 view = glm::translate(glm::mat4(1.0f), glm::vec3(pan, 0.0f));
+    viewProjMatrix = proj * view;
+    cameraDirty = true;
+}
 
-// Empty function stubs — add the correct content here (these must exist!)
 VkShaderModule Renderer::loadShaderModule(const std::string& filepath) {
     std::ifstream file(filepath, std::ios::ate | std::ios::binary);
     if (!file.is_open()) {
@@ -616,4 +607,10 @@ void Renderer::createDevice() {
 
     check_vk_result(vkCreateDevice(physical_device, &device_info, nullptr, &device));
     vkGetDeviceQueue(device, queue_family, 0, &queue);
+}
+
+void Renderer::markAllDirty() {
+    sceneDirty = true;
+    selectionDirty = true;
+    cameraDirty = true;
 }
